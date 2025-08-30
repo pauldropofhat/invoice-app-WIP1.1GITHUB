@@ -1,1 +1,21 @@
 node_modules
+# Ignore local backups and exported data
+*.json
+*.csv
+*.xlsx
+
+# But keep package.json, tsconfig.json, etc.
+!package.json
+!tsconfig.json
+!vite.config.js
+
+# Ignore local OS/IDE junk
+.DS_Store
+Thumbs.db
+
+# Ignore node modules and build output
+node_modules/
+dist/
+
+# Ignore backup folders
+backups/
