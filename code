@@ -1,0 +1,458 @@
+ import React, { useState, useEffect } from "react";
+import { Home, FileText, Settings, Users } from "lucide-react";
+import jsPDF from "jspdf";
+
+// ---------- Utilities ----------
+function parseUKDate(uk) {
+  if (!uk || typeof uk !== "string") return new Date(NaN);
+  const [d, m, y] = uk.split("/").map((v) => parseInt(v, 10));
+  if (!d || !m || !y) return new Date(NaN);
+  return new Date(y, m - 1, d);
+}
+function daysBetween(a, b) {
+  const MS = 1000 * 60 * 60 * 24;
+  const utc1 = Date.UTC(a.getFullYear(), a.getMonth(), a.getDate());
+  const utc2 = Date.UTC(b.getFullYear(), b.getMonth(), b.getDate());
+  return Math.floor((utc2 - utc1) / MS);
+}
+function safeName(str) {
+  return (str || "").replace(/\s+/g, "_").replace(/[^A-Za-z0-9_-]/g, "");
+}
+function loadProfile() {
+  try {
+    const p = JSON.parse(localStorage.getItem("profile") || "{}");
+    return {
+      companyName: p.companyName || "Your Business",
+      address: p.address || "",
+      bank: p.bank || "",
+      sortCode: p.sortCode || "",
+      logo: p.logo || null,
+    };
+  } catch {
+    return { companyName: "Your Business", address: "", bank: "", sortCode: "", logo: null };
+  }
+}
+
+// ---------- PDF helpers ----------
+function buildInvoicePDF(invoice) {
+  const profile = loadProfile();
+  const doc = new jsPDF();
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  if (profile.logo) { try { doc.addImage(profile.logo, "PNG", pageW - 60, 10, 50, 20); } catch {} }
+  doc.setFontSize(18); doc.text(profile.companyName, 20, 20);
+  if (profile.address) { doc.setFontSize(10); doc.text(profile.address, 20, 28); }
+  doc.setFontSize(16); doc.text("Invoice", 20, 45);
+  doc.setFont(undefined, "bold"); doc.setFontSize(12);
+  doc.text("Invoice No: " + invoice.number, 20, 58);
+  doc.setFont(undefined, "normal"); doc.text("Date: " + invoice.date, 20, 66);
+  doc.text("Client: " + invoice.client, 20, 82);
+  doc.text("Amount: £" + invoice.amount, 20, 90);
+  doc.text("Status: " + invoice.status, 20, 98);
+  const addFooter = () => {
+    doc.setFontSize(11); doc.setFont(undefined, "bold");
+    doc.text("Bank Account: " + profile.bank + "  |  Sort Code: " + profile.sortCode, 20, pageH - 18);
+    doc.setFont(undefined, "normal"); doc.text("Thank you for your custom.", 20, pageH - 10);
+  };
+  const totalPages = doc.internal.getNumberOfPages();
+  for (let i = 1; i <= totalPages; i++) { doc.setPage(i); addFooter(); }
+  const fileName = "Invoice_INV-" + invoice.number + "_" + safeName(profile.companyName) + ".pdf";
+  return { save: () => doc.save(fileName), toBase64: () => doc.output("datauristring").split(",")[1], fileName };
+}
+function generateInvoicePDF(invoice) { buildInvoicePDF(invoice).save(); }
+function generateReceiptPDF(invoice) {
+  const profile = loadProfile();
+  const doc = new jsPDF();
+  const pageW = doc.internal.pageSize.getWidth();
+  const pageH = doc.internal.pageSize.getHeight();
+  if (profile.logo) { try { doc.addImage(profile.logo, "PNG", pageW - 60, 10, 50, 20); } catch {} }
+  doc.setFontSize(18); doc.text(profile.companyName, 20, 20);
+  doc.setFontSize(16); doc.text("Receipt", 20, 45);
+  doc.setFont(undefined, "bold"); doc.setFontSize(12);
+  doc.text("Invoice No: " + invoice.number, 20, 60);
+  doc.setFont(undefined, "normal"); doc.text("Paid in Full", 20, 70);
+  doc.text("Client: " + invoice.client, 20, 82);
+  const addFooter = () => {
+    doc.setFontSize(11); doc.setFont(undefined, "bold");
+    doc.text("Bank Account: " + profile.bank + "  |  Sort Code: " + profile.sortCode, 20, pageH - 18);
+    doc.setFont(undefined, "normal"); doc.text("Thank you for your custom.", 20, pageH - 10);
+  };
+  const totalPages = doc.internal.getNumberOfPages();
+  for (let i = 1; i <= totalPages; i++) { doc.setPage(i); addFooter(); }
+  const fileName = "Receipt_INV-" + invoice.number + "_" + safeName(profile.companyName) + ".pdf";
+  return { save: () => doc.save(fileName), toBase64: () => doc.output("datauristring").split(",")[1], fileName };
+}
+async function openLocalEmailWithAttachment({ to, subject, body, attachmentBase64, attachmentFileName }) {
+  try {
+    const { EmailComposer } = await import('@capacitor-community/email-composer');
+    const isAvailable = await EmailComposer.hasAccount();
+    if (isAvailable) {
+      await EmailComposer.open({
+        to: [to], subject, body, isHtml: false,
+        attachments: [`base64:${attachmentFileName}//${attachmentBase64}`],
+      });
+      return true;
+    }
+  } catch(e) { console.warn('EmailComposer not available:', e); }
+  const mailto = `mailto:${encodeURIComponent(to)}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+  window.location.href = mailto; return false;
+}
+
+// ---------- App ----------
+export default function App() {
+  const [invoices, setInvoices] = useState([]);
+  const [clients, setClients] = useState([]);
+  const [activeTab, setActiveTab] = useState("home");
+  const [selectedInvoice, setSelectedInvoice] = useState(null);
+  const [selectedClient, setSelectedClient] = useState(null);
+
+  // Load
+  useEffect(() => {
+    const invRaw = localStorage.getItem("invoices"); if (invRaw) setInvoices(JSON.parse(invRaw));
+    const clRaw = localStorage.getItem("clients"); if (clRaw) setClients(JSON.parse(clRaw));
+  }, []);
+  // Save
+  useEffect(() => { localStorage.setItem("invoices", JSON.stringify(invoices)); }, [invoices]);
+  useEffect(() => { localStorage.setItem("clients", JSON.stringify(clients)); }, [clients]);
+
+  // Status recompute
+  const today = new Date();
+  const invoicesWithStatus = invoices.map((inv) => {
+    if (inv.status === "Paid") return inv;
+    const d = parseUKDate(inv.date) || new Date(inv.date);
+    const diff = daysBetween(d, today);
+    return diff >= 7 ? { ...inv, status: "Overdue", _overdueDays: Math.min(diff, 1825) } : { ...inv, status: "Unpaid", _overdueDays: 0 };
+  });
+  const overdueCount = invoicesWithStatus.filter(i => i.status === "Overdue").length;
+
+  const navButtonClasses = (tab) => `relative flex flex-col items-center px-4 py-2 ${activeTab === tab ? 'text-blue-600 font-semibold' : 'text-gray-600'}`;
+
+  const openInvoice = (inv) => { setSelectedInvoice(inv); setActiveTab('invoiceDetail'); };
+
+  return (
+    <div className="h-screen flex flex-col">
+      <div className="flex-1 overflow-y-auto p-4">
+        {activeTab === 'home' && <HomePage invoices={invoicesWithStatus} />}
+        {activeTab === 'invoices' && (
+          <Invoices invoices={invoicesWithStatus} setInvoices={setInvoices} onOpenInvoice={openInvoice} />
+        )}
+        {activeTab === 'invoiceDetail' && selectedInvoice && (
+          <InvoiceDetail invoice={selectedInvoice} onBack={() => setActiveTab('invoices')} />
+        )}
+        {activeTab === 'clients' && (
+          <Clients clients={clients} setClients={setClients} invoices={invoicesWithStatus} onOpenClient={(c)=>{setSelectedClient(c); setActiveTab('clientDetail');}} />
+        )}
+        {activeTab === 'clientDetail' && selectedClient && (
+          <ClientDetail client={selectedClient} invoices={invoicesWithStatus} onBack={()=>setActiveTab('clients')} />
+        )}
+        {activeTab === 'settings' && <div>⚙️ Settings</div>}
+      </div>
+
+      <div className="h-16 border-t flex justify-around items-center bg-white relative">
+        <button onClick={() => setActiveTab('home')} className={navButtonClasses('home')}>
+          <Home size={20} />
+          <span className="text-xs">Home</span>
+        </button>
+        <button onClick={() => setActiveTab('invoices')} className={navButtonClasses('invoices')}>
+          <FileText size={20} />
+          <span className="text-xs">Invoices</span>
+          {overdueCount > 0 && (
+            <span className="absolute -top-1 -right-2 bg-red-500 text-white text-xs rounded-full px-1">{overdueCount}</span>
+          )}
+        </button>
+        <button onClick={() => setActiveTab('clients')} className={navButtonClasses('clients')}>
+          <Users size={20} />
+          <span className="text-xs">Clients</span>
+        </button>
+        <button onClick={() => setActiveTab('settings')} className={navButtonClasses('settings')}>
+          <Settings size={20} />
+          <span className="text-xs">Settings</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Home ----------
+function HomePage({ invoices }) {
+  // Financial summary (display-only)
+  const totalInvoiced = invoices.reduce((s, i) => s + (Number(i.amount)||0), 0);
+  const totalPaid = invoices.filter(i=>i.status==='Paid').reduce((s,i)=>s+(Number(i.amount)||0),0);
+  const outstanding = invoices.filter(i=>i.status!=='Paid').reduce((s,i)=>s+(Number(i.amount)||0),0);
+  const overdueAmt = invoices.filter(i=>i.status==='Overdue').reduce((s,i)=>s+(Number(i.amount)||0),0);
+
+  // Recent activity (only invoice events). Here we fake events from data: newest first by date.
+  const recent = [...invoices].sort((a,b)=>{
+    const da = parseUKDate(a.date)||new Date(a.date);
+    const db = parseUKDate(b.date)||new Date(b.date);
+    return db - da;
+  });
+
+  const iconFor = (inv) => inv.status==='Paid' ? '✅' : (inv.status==='Overdue' ? '⏰' : '📝');
+  const labelFor = (inv) => inv.status==='Paid' ? `marked as Paid` : (inv.status==='Overdue' ? `overdue — ${Math.min(inv._overdueDays||0,1825)} days overdue` : 'created');
+
+  // Show all from today; then last 5 from earlier days (simplified: just show up to 10 total for mockup)
+  const items = recent.slice(0,10);
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap gap-2">
+        <span className="px-3 py-1 rounded-full text-sm bg-blue-600 text-white">Total Invoiced: £{totalInvoiced.toFixed(2)}</span>
+        <span className="px-3 py-1 rounded-full text-sm bg-green-600 text-white">Total Paid: £{totalPaid.toFixed(2)}</span>
+        <span className="px-3 py-1 rounded-full text-sm bg-orange-500 text-white">Outstanding: £{outstanding.toFixed(2)}</span>
+        <span className="px-3 py-1 rounded-full text-sm bg-red-600 text-white">Overdue: £{overdueAmt.toFixed(2)}</span>
+      </div>
+
+      <div>
+        <div className="font-semibold mb-2">Recent Activity</div>
+        <div className="space-y-2">
+          {items.map(inv => (
+            <div key={inv.number} className="p-3 border rounded flex justify-between">
+              <div>
+                {iconFor(inv)} INV-{inv.number} {labelFor(inv)} for {inv.client} (£{inv.amount})
+              </div>
+            </div>
+          ))}
+          {items.length===0 && <div className="text-gray-500">No recent activity.</div>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Invoices ----------
+function Invoices({ invoices, setInvoices, onOpenInvoice }) {
+  const [filter, setFilter] = useState("All");
+  const counts = {
+    total: invoices.length,
+    unpaid: invoices.filter(i=>i.status==='Unpaid').length,
+    overdue: invoices.filter(i=>i.status==='Overdue').length,
+    paid: invoices.filter(i=>i.status==='Paid').length,
+  };
+  const filtered = invoices.filter(inv => filter==='All' ? true : inv.status===filter)
+    .sort((a,b)=>{ const da=parseUKDate(a.date)||new Date(a.date); const db=parseUKDate(b.date)||new Date(b.date); return db-da; });
+  const badgeClasses = (active, color) => `px-3 py-1 rounded-full text-sm font-medium cursor-pointer ${active? color+"-600 text-white" : 'bg-gray-200 text-gray-700'}`;
+
+  const handleMarkPaid = async (inv) => {
+    const ok = window.confirm(`Mark Invoice ${inv.number} as Paid? This will generate a receipt.`);
+    if (!ok) return;
+    const updated = invoices.map(i => i.number===inv.number ? { ...i, status:'Paid' } : i);
+    setInvoices(updated);
+    const profile = loadProfile();
+    const receipt = generateReceiptPDF(inv);
+    const base64 = receipt.toBase64();
+    const to = inv.email || inv.clientEmail || '';
+    if (!to) { alert('No client email on this invoice. Please add an email to send the receipt.'); receipt.save(); return; }
+    const subject = `Receipt for Invoice INV-${inv.number} from ${profile.companyName}`;
+    const body = `Please find your receipt attached.`;
+    await openLocalEmailWithAttachment({ to, subject, body, attachmentBase64: base64, attachmentFileName: receipt.fileName });
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex space-x-2">
+        <span className={badgeClasses(filter==='All','bg-blue')} onClick={()=>setFilter('All')}>Total: {counts.total}</span>
+        <span className={badgeClasses(filter==='Unpaid','bg-gray')} onClick={()=>setFilter('Unpaid')}>Unpaid: {counts.unpaid}</span>
+        <span className={badgeClasses(filter==='Overdue','bg-red')} onClick={()=>setFilter('Overdue')}>Overdue: {counts.overdue}</span>
+        <span className={badgeClasses(filter==='Paid','bg-green')} onClick={()=>setFilter('Paid')}>Paid: {counts.paid}</span>
+      </div>
+      <select className="border rounded p-2" value={filter} onChange={(e)=>setFilter(e.target.value)}>
+        <option>All</option><option>Unpaid</option><option>Overdue</option><option>Paid</option>
+      </select>
+      <div className="space-y-2">
+        {filtered.map(inv => {
+          const isOverdue = inv.status==='Overdue';
+          const od = Math.min(inv._overdueDays||0, 1825);
+          return (
+            <div key={inv.number} className="p-4 border rounded" onClick={()=>onOpenInvoice(inv)}>
+              <div className="flex justify-between items-center">
+                <div>
+                  <div className="font-semibold">Invoice #{inv.number}</div>
+                  <div className="text-sm text-gray-500">{inv.client}</div>
+                  <div className="text-sm text-gray-500">£{inv.amount}</div>
+                  <div className="text-sm text-gray-400">Date: {inv.date}</div>
+                  {isOverdue && <div className="text-xs text-red-600 mt-1">{od} days overdue</div>}
+                </div>
+                <div className="flex items-center gap-2" onClick={(e)=>e.stopPropagation()}>
+                  {inv.status==='Unpaid' && (
+                    <>
+                      <button onClick={()=>handleMarkPaid(inv)} className="px-3 py-1 bg-blue-500 text-white rounded">Mark as Paid</button>
+                      <span className="px-3 py-1 bg-gray-400 text-white rounded-full text-sm">Unpaid</span>
+                    </>
+                  )}
+                  {inv.status==='Paid' && (
+                    <span className="px-3 py-1 bg-green-500 text-white rounded-full text-sm">Paid</span>
+                  )}
+                  {inv.status==='Overdue' && (
+                    <>
+                      <button onClick={()=>handleMarkPaid(inv)} className="px-3 py-1 bg-blue-500 text-white rounded">Mark as Paid</button>
+                      <span className="px-3 py-1 bg-red-500 text-white rounded-full text-sm">Overdue</span>
+                    </>
+                  )}
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        {filtered.length===0 && <div className="text-gray-500">No invoices found.</div>}
+      </div>
+    </div>
+  );
+}
+
+function InvoiceDetail({ invoice, onBack }) {
+  const today = new Date();
+  const invDate = parseUKDate(invoice.date) || new Date(invoice.date);
+  const diffDays = Math.max(0, daysBetween(invDate, today));
+  const overdueDays = Math.min(diffDays, 1825);
+  const isOverdue = invoice.status === 'Overdue';
+  return (
+    <div className="max-w-xl mx-auto space-y-4">
+      <button onClick={onBack} className="text-blue-600 underline">← Back to Invoices</button>
+      <div className="p-4 border rounded">
+        <div className="flex justify-between items-start">
+          <div>
+            <div className="text-lg font-bold">Invoice #{invoice.number}</div>
+            <div className="text-sm text-gray-600">{invoice.client}</div>
+            <div className="text-sm text-gray-600">Date: {invoice.date}</div>
+            <div className="text-sm text-gray-600">Amount: £{invoice.amount}</div>
+          </div>
+          <div className="flex flex-col items-end gap-2">
+            {invoice.status==='Paid' && <span className="px-3 py-1 bg-green-500 text-white rounded-full text-sm">Paid</span>}
+            {invoice.status==='Unpaid' && <span className="px-3 py-1 bg-gray-400 text-white rounded-full text-sm">Unpaid</span>}
+            {invoice.status==='Overdue' && <span className="px-3 py-1 bg-red-500 text-white rounded-full text-sm">Overdue</span>}
+          </div>
+        </div>
+        {isOverdue && <div className="text-sm text-red-600 mt-2">{overdueDays} days overdue</div>}
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button onClick={()=>generateInvoicePDF(invoice)} className="px-3 py-2 bg-blue-600 text-white rounded">Download PDF</button>
+          <button onClick={async()=>{
+            const profile = loadProfile();
+            const invPdf = buildInvoicePDF(invoice);
+            const to = invoice.email || invoice.clientEmail || '';
+            if (!to) { alert('No client email on this invoice. Please add an email to send the invoice.'); return; }
+            const subject = `Invoice INV-${invoice.number} from ${profile.companyName}`;
+            const body = `Please find your invoice attached.`;
+            await openLocalEmailWithAttachment({ to, subject, body, attachmentBase64: invPdf.toBase64(), attachmentFileName: invPdf.fileName });
+          }} className="px-3 py-2 bg-indigo-600 text-white rounded">Email Invoice</button>
+          {invoice.status==='Paid' && (
+            <button onClick={()=>generateReceiptPDF(invoice).save()} className="px-3 py-2 bg-green-600 text-white rounded">Download Receipt</button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ---------- Clients ----------
+function Clients({ clients, setClients, invoices, onOpenClient }) {
+  const [filter, setFilter] = useState('All');
+  const [form, setForm] = useState({ name:'', email:'', address:'' });
+  const invByClient = (c) => invoices.filter(inv => (c.email && (inv.email===c.email || inv.clientEmail===c.email)) || inv.client===c.name);
+  const hasUnpaid = (c)=> invByClient(c).some(i=>i.status==='Unpaid');
+  const hasOverdue = (c)=> invByClient(c).some(i=>i.status==='Overdue');
+  const allPaid = (c)=> invByClient(c).length>0 && invByClient(c).every(i=>i.status==='Paid');
+  const outstandingAmount = (c)=> invByClient(c).filter(i=>i.status!=='Paid').reduce((s,i)=>s+(Number(i.amount)||0),0);
+  const counts = {
+    total: clients.length,
+    withUnpaid: clients.filter(hasUnpaid).length,
+    withOverdue: clients.filter(hasOverdue).length,
+    allPaid: clients.filter(allPaid).length,
+    totalOutstanding: clients.reduce((s,c)=>s+outstandingAmount(c),0),
+  };
+  const filtered = clients.filter(c=>{
+    if (filter==='All') return true;
+    if (filter==='Unpaid') return hasUnpaid(c);
+    if (filter==='Overdue') return hasOverdue(c);
+    if (filter==='AllPaid') return allPaid(c);
+    return true;
+  });
+  const addClient = ()=>{ if(!form.name||!form.email) return; setClients([{name:form.name,email:form.email,address:form.address}, ...clients]); setForm({name:'',email:'',address:''}); };
+  const removeClient = (email)=>{ if(!window.confirm('Remove this client?')) return; setClients(clients.filter(c=>c.email!==email)); };
+
+  const badge = (active, cls, label, key) => (
+    <span onClick={()=>setFilter(key)} className={`px-3 py-1 rounded-full text-sm font-medium cursor-pointer ${active?cls:'bg-gray-200 text-gray-700'}`}>{label}</span>
+  );
+
+  return (
+    <div className="space-y-4">
+      <div className="flex flex-wrap gap-2 items-center">
+        {badge(filter==='All','bg-blue-600 text-white',`Total: ${counts.total}`,'All')}
+        {badge(filter==='Unpaid','bg-gray-600 text-white',`With Unpaid: ${counts.withUnpaid}`,'Unpaid')}
+        {badge(filter==='Overdue','bg-red-600 text-white',`With Overdue: ${counts.withOverdue}`,'Overdue')}
+        {badge(filter==='AllPaid','bg-green-600 text-white',`All Paid: ${counts.allPaid}`,'AllPaid')}
+        <span className="px-3 py-1 rounded-full text-sm font-medium bg-orange-500 text-white">Total Outstanding: £{counts.totalOutstanding.toFixed(2)}</span>
+      </div>
+
+      <div className="p-3 border rounded grid gap-2 grid-cols-1 md:grid-cols-4">
+        <input className="border p-2 rounded" placeholder="Client Name" value={form.name} onChange={e=>setForm({...form,name:e.target.value})} />
+        <input className="border p-2 rounded" placeholder="Client Email" value={form.email} onChange={e=>setForm({...form,email:e.target.value})} />
+        <input className="border p-2 rounded md:col-span-2" placeholder="Client Address" value={form.address} onChange={e=>setForm({...form,address:e.target.value})} />
+        <button onClick={addClient} className="px-3 py-2 bg-blue-600 text-white rounded">Add Client</button>
+      </div>
+
+      <div className="space-y-2">
+        {filtered.sort((a,b)=>a.name.localeCompare(b.name)).map(c=>{
+          const overdueN = invByClient(c).filter(i=>i.status==='Overdue').length;
+          const outAmt = outstandingAmount(c);
+          return (
+            <div key={c.email} className="p-4 border rounded flex justify-between items-center">
+              <div onClick={()=>onOpenClient(c)} className="cursor-pointer">
+                <div className="font-semibold">{c.name} <span className="text-sm text-gray-500">({c.email})</span></div>
+                {c.address && <div className="text-sm text-gray-500">{c.address}</div>}
+                {outAmt>0 && <div className="text-xs text-orange-600">Outstanding: £{outAmt.toFixed(2)}</div>}
+              </div>
+              <div className="flex items-center gap-2">
+                {overdueN>0 && <span className="px-2 py-1 bg-red-500 text-white rounded-full text-xs">{overdueN} overdue</span>}
+                <button onClick={()=>removeClient(c.email)} className="px-2 py-1 text-sm bg-gray-100 border rounded">Delete</button>
+              </div>
+            </div>
+          );
+        })}
+        {filtered.length===0 && <div className="text-gray-500">No clients.</div>}
+      </div>
+    </div>
+  );
+}
+
+function ClientDetail({ client, invoices, onBack }) {
+  const myInvoices = invoices
+    .filter(inv => (client.email && (inv.email===client.email || inv.clientEmail===client.email)) || inv.client===client.name)
+    .sort((a,b)=>{ const da=parseUKDate(a.date)||new Date(a.date); const db=parseUKDate(b.date)||new Date(b.date); return db-da; });
+  const total = myInvoices.reduce((s,i)=>s+(Number(i.amount)||0),0);
+  const paid = myInvoices.filter(i=>i.status==='Paid').reduce((s,i)=>s+(Number(i.amount)||0),0);
+  const outstanding = myInvoices.filter(i=>i.status!=='Paid').reduce((s,i)=>s+(Number(i.amount)||0),0);
+  return (
+    <div className="max-w-3xl mx-auto space-y-4">
+      <button onClick={onBack} className="text-blue-600 underline">← Back to Clients</button>
+      <div className="p-4 border rounded">
+        <div className="text-lg font-bold">{client.name}</div>
+        <div className="text-sm text-gray-600">{client.email}</div>
+        {client.address && <div className="text-sm text-gray-600">{client.address}</div>}
+        <div className="flex flex-wrap gap-2 mt-3">
+          <span className="px-3 py-1 rounded-full text-sm bg-blue-600 text-white">Total Invoiced: £{total.toFixed(2)}</span>
+          <span className="px-3 py-1 rounded-full text-sm bg-green-600 text-white">Total Paid: £{paid.toFixed(2)}</span>
+          <span className={`px-3 py-1 rounded-full text-sm ${outstanding>0? 'bg-orange-500 text-white':'bg-green-700 text-white'}`}>Outstanding: £{outstanding.toFixed(2)}</span>
+        </div>
+      </div>
+      <div className="space-y-2">
+        {myInvoices.map(inv=> (
+          <div key={inv.number} className="p-4 border rounded flex justify-between items-center">
+            <div>
+              <div className="font-semibold">Invoice #{inv.number}</div>
+              <div className="text-sm text-gray-500">Date: {inv.date}</div>
+              <div className="text-sm text-gray-500">Amount: £{inv.amount}</div>
+            </div>
+            <div>
+              {inv.status==='Paid' && <span className="px-3 py-1 bg-green-500 text-white rounded-full text-sm">Paid</span>}
+              {inv.status==='Unpaid' && <span className="px-3 py-1 bg-gray-400 text-white rounded-full text-sm">Unpaid</span>}
+              {inv.status==='Overdue' && <span className="px-3 py-1 bg-red-500 text-white rounded-full text-sm">Overdue</span>}
+            </div>
+          </div>
+        ))}
+        {myInvoices.length===0 && <div className="text-gray-500">No invoices for this client yet.</div>}
+      </div>
+    </div>
+  );
+}
+
