@@ -1,0 +1,5 @@
+@echo off
+cd /d "%~dp0"
+echo Starting Invoicer...
+call npm run dev:file
+pause
